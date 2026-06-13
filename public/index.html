@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Agente WhatsApp — Pedidos</title>
+<script src="/socket.io/socket.io.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg: #f5f4f0;
+    --card: #ffffff;
+    --border: rgba(0,0,0,0.08);
+    --border2: rgba(0,0,0,0.15);
+    --text: #1a1a18;
+    --muted: #6b6b66;
+    --green: #1D9E75;
+    --green-bg: #E1F5EE;
+    --green-text: #085041;
+    --amber: #BA7517;
+    --amber-bg: #FAEEDA;
+    --amber-text: #633806;
+    --red: #A32D2D;
+    --red-bg: #FCEBEB;
+    --red-text: #501313;
+    --blue: #185FA5;
+    --blue-bg: #E6F1FB;
+    --blue-text: #042C53;
+    --purple: #534AB7;
+    --purple-bg: #EEEDFE;
+    --purple-text: #26215C;
+  }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; }
+
+  /* TOPBAR */
+  .topbar { background: var(--card); border-bottom: 1px solid var(--border); padding: 14px 24px; display: flex; align-items: center; justify-content: space-between; position: sticky; top: 0; z-index: 10; }
+  .topbar-left { display: flex; align-items: center; gap: 10px; }
+  .logo { width: 32px; height: 32px; background: var(--green); border-radius: 8px; display: flex; align-items: center; justify-content: center; }
+  .logo svg { width: 18px; height: 18px; fill: white; }
+  .topbar h1 { font-size: 16px; font-weight: 600; }
+  .topbar h1 span { font-weight: 400; color: var(--muted); }
+  .status-dot { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: #ccc; transition: background .3s; }
+  .dot.conectado { background: var(--green); box-shadow: 0 0 0 3px rgba(29,158,117,0.2); }
+  .dot.esperando_qr { background: var(--amber); }
+  .dot.desconectado { background: var(--red); }
+
+  /* QR MODAL */
+  .qr-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 100; align-items: center; justify-content: center; }
+  .qr-overlay.visible { display: flex; }
+  .qr-card { background: var(--card); border-radius: 16px; padding: 32px; text-align: center; max-width: 320px; width: 90%; }
+  .qr-card h2 { font-size: 18px; margin-bottom: 8px; }
+  .qr-card p { font-size: 13px; color: var(--muted); margin-bottom: 20px; line-height: 1.5; }
+  .qr-card img { width: 200px; height: 200px; border-radius: 8px; border: 1px solid var(--border); }
+
+  /* STATS */
+  .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; padding: 20px 24px 0; }
+  .stat { background: var(--card); border-radius: 10px; border: 1px solid var(--border); padding: 16px; }
+  .stat-label { font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+  .stat-value { font-size: 24px; font-weight: 600; }
+  .stat-value.green { color: var(--green); }
+  .stat-value.amber { color: var(--amber); }
+  .stat-value.blue { color: var(--blue); }
+
+  /* MAIN */
+  .main { padding: 20px 24px; display: flex; gap: 16px; }
+  .pedidos-col { flex: 1; min-width: 0; }
+  .col-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+  .col-header h2 { font-size: 15px; font-weight: 600; }
+  .btn-simular { font-size: 12px; padding: 6px 12px; border-radius: 6px; border: 1px solid var(--border2); background: transparent; cursor: pointer; color: var(--muted); transition: all .15s; }
+  .btn-simular:hover { background: var(--bg); color: var(--text); }
+
+  /* PEDIDO CARD */
+  .pedido { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 16px; margin-bottom: 12px; transition: border-color .2s; }
+  .pedido.nuevo { border-color: var(--green); border-width: 2px; animation: fadeIn .4s ease; }
+  .pedido.confirmado { opacity: 0.75; }
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: translateY(0); } }
+
+  .pedido-header { display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 12px; }
+  .pedido-id { font-size: 14px; font-weight: 600; }
+  .pedido-time { font-size: 12px; color: var(--muted); margin-top: 2px; }
+  .badge { font-size: 11px; font-weight: 600; padding: 3px 10px; border-radius: 20px; }
+  .badge-pendiente { background: var(--amber-bg); color: var(--amber-text); }
+  .badge-confirmado { background: var(--green-bg); color: var(--green-text); }
+  .badge-revision { background: var(--red-bg); color: var(--red-text); }
+  .badge-rechazado { background: var(--border); color: var(--muted); }
+
+  .pedido-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 12px; }
+  .campo { font-size: 13px; }
+  .campo-label { color: var(--muted); font-size: 11px; margin-bottom: 2px; }
+  .campo-value { font-weight: 500; }
+
+  .ia-decision { font-size: 12px; padding: 8px 12px; border-radius: 8px; margin-bottom: 12px; display: flex; align-items: center; gap: 6px; }
+  .ia-decision.ok { background: var(--green-bg); color: var(--green-text); }
+  .ia-decision.warn { background: var(--amber-bg); color: var(--amber-text); }
+  .ia-decision .ia-icon { font-size: 14px; }
+
+  .pedido-actions { display: flex; gap: 8px; }
+  .btn { font-size: 13px; padding: 7px 14px; border-radius: 8px; border: 1px solid var(--border2); background: transparent; cursor: pointer; color: var(--text); display: flex; align-items: center; gap: 5px; transition: all .15s; font-weight: 500; }
+  .btn:hover { background: var(--bg); }
+  .btn-green { background: var(--green); border-color: var(--green); color: white; }
+  .btn-green:hover { background: #0F6E56; }
+  .btn-red:hover { background: var(--red-bg); color: var(--red); border-color: var(--red); }
+
+  .msg-preview { background: var(--bg); border-radius: 8px; padding: 10px 12px; font-size: 12px; color: var(--muted); margin-bottom: 12px; border-left: 3px solid var(--green); white-space: pre-wrap; line-height: 1.5; }
+
+  .empty { text-align: center; padding: 48px 24px; color: var(--muted); }
+  .empty-icon { font-size: 40px; margin-bottom: 12px; }
+  .empty p { font-size: 14px; line-height: 1.6; }
+
+  /* PANEL LATERAL */
+  .sidebar { width: 280px; flex-shrink: 0; }
+  .sidebar-card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 16px; margin-bottom: 12px; }
+  .sidebar-card h3 { font-size: 14px; font-weight: 600; margin-bottom: 12px; color: var(--text); }
+  .sidebar-card p { font-size: 13px; color: var(--muted); line-height: 1.6; }
+  .msg-template { font-size: 12px; background: var(--bg); border-radius: 8px; padding: 12px; white-space: pre-wrap; line-height: 1.6; color: var(--text); border-left: 3px solid var(--green); }
+
+  @media (max-width: 768px) {
+    .stats { grid-template-columns: repeat(2, 1fr); }
+    .main { flex-direction: column; }
+    .sidebar { width: 100%; }
+  }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-left">
+    <div class="logo">
+      <svg viewBox="0 0 24 24"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347z"/><path d="M11.99 0C5.373 0 0 5.373 0 12c0 2.117.554 4.104 1.524 5.831L.057 23.996l6.304-1.654A11.954 11.954 0 0011.99 24C18.628 24 24 18.627 24 12S18.628 0 11.99 0z"/></svg>
+    </div>
+    <h1>Agente WhatsApp <span>— Pedidos en tiempo real</span></h1>
+  </div>
+  <div class="status-dot">
+    <div class="dot" id="dot"></div>
+    <span id="status-text">Conectando...</span>
+  </div>
+</div>
+
+<!-- QR Modal -->
+<div class="qr-overlay" id="qr-overlay">
+  <div class="qr-card">
+    <h2>📱 Conecta tu WhatsApp</h2>
+    <p>Abre WhatsApp en tu teléfono → Dispositivos vinculados → Vincular dispositivo → escanea este código</p>
+    <img id="qr-img" src="" alt="Código QR">
+    <p style="margin-top:16px;font-size:12px;">El código se actualiza automáticamente</p>
+  </div>
+</div>
+
+<!-- Stats -->
+<div class="stats">
+  <div class="stat">
+    <div class="stat-label">📨 Pedidos hoy</div>
+    <div class="stat-value blue" id="stat-total">0</div>
+  </div>
+  <div class="stat">
+    <div class="stat-label">✅ Confirmados</div>
+    <div class="stat-value green" id="stat-confirmados">0</div>
+  </div>
+  <div class="stat">
+    <div class="stat-label">⏳ Pendientes</div>
+    <div class="stat-value amber" id="stat-pendientes">0</div>
+  </div>
+  <div class="stat">
+    <div class="stat-label">💰 Total confirmado</div>
+    <div class="stat-value green" id="stat-dinero">$0</div>
+  </div>
+</div>
+
+<!-- Main -->
+<div class="main">
+  <div class="pedidos-col">
+    <div class="col-header">
+      <h2>Pedidos recibidos</h2>
+      <button class="btn-simular" onclick="simularPedido()">⚡ Simular pedido de prueba</button>
+    </div>
+    <div id="pedidos-list">
+      <div class="empty">
+        <div class="empty-icon">📬</div>
+        <p>Aquí aparecerán tus pedidos en tiempo real.<br>Conecta tu WhatsApp para empezar.</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="sidebar">
+    <div class="sidebar-card">
+      <h3>🤖 Mensaje de confirmación</h3>
+      <div class="msg-template">✅ ¡Hola [nombre]! Tu pedido #[número] ha sido CONFIRMADO 🎉
+
+🛍️ [producto]
+📦 Cantidad: [cantidad]
+💰 Total: $[total]
+📍 Entrega en: [ciudad]
+
+🚚 Tu pedido llegará a su destino en un plazo de 24 a 72 horas hábiles.
+¡Gracias por tu compra! 💪</div>
+    </div>
+    <div class="sidebar-card">
+      <h3>ℹ️ Cómo funciona</h3>
+      <p>1. Llega un pedido a tu WhatsApp<br><br>2. La IA lo analiza y extrae los datos<br><br>3. Si está completo → confirma automáticamente<br><br>4. Si falta info → le escribe al cliente pidiendo los datos<br><br>5. Todo aparece aquí en tiempo real</p>
+    </div>
+  </div>
+</div>
+
+<script>
+const socket = io();
+const pedidosMap = new Map();
+
+// Estado
+socket.on('estado', ({ estado, mensaje }) => {
+  const dot = document.getElementById('dot');
+  const txt = document.getElementById('status-text');
+  dot.className = 'dot ' + estado;
+  txt.textContent = mensaje;
+  if (estado === 'conectado') document.getElementById('qr-overlay').classList.remove('visible');
+});
+
+socket.on('qr', (dataUrl) => {
+  document.getElementById('qr-img').src = dataUrl;
+  document.getElementById('qr-overlay').classList.add('visible');
+});
+
+socket.on('nuevo_pedido', (pedido) => {
+  pedidosMap.set(pedido.id, pedido);
+  renderPedidos();
+  actualizarStats();
+});
+
+socket.on('pedido_actualizado', (pedido) => {
+  pedidosMap.set(pedido.id, pedido);
+  renderPedidos();
+  actualizarStats();
+});
+
+// Cargar estado inicial
+fetch('/api/estado').then(r => r.json()).then(data => {
+  document.getElementById('dot').className = 'dot ' + data.estado;
+  document.getElementById('status-text').textContent =
+    data.estado === 'conectado' ? 'Conectado ✓' :
+    data.estado === 'esperando_qr' ? 'Escanea el QR' : 'Desconectado';
+  actualizarStatsDesdeData(data);
+  if (data.qr) {
+    document.getElementById('qr-img').src = data.qr;
+    document.getElementById('qr-overlay').classList.add('visible');
+  }
+});
+
+fetch('/api/pedidos').then(r => r.json()).then(lista => {
+  lista.forEach(p => pedidosMap.set(p.id, p));
+  renderPedidos();
+  actualizarStats();
+});
+
+function renderPedidos() {
+  const lista = document.getElementById('pedidos-list');
+  if (pedidosMap.size === 0) {
+    lista.innerHTML = `<div class="empty"><div class="empty-icon">📬</div><p>Aquí aparecerán tus pedidos en tiempo real.<br>Conecta tu WhatsApp para empezar.</p></div>`;
+    return;
+  }
+  const pedidos = Array.from(pedidosMap.values()).sort((a,b) => b.id - a.id);
+  lista.innerHTML = pedidos.map(p => renderPedido(p)).join('');
+}
+
+function renderPedido(p) {
+  const d = p.datos || {};
+  const badges = {
+    pendiente_confirmacion: '<span class="badge badge-pendiente">Pendiente</span>',
+    confirmado: '<span class="badge badge-confirmado">Confirmado ✓</span>',
+    revision: '<span class="badge badge-revision">Revisión</span>',
+    rechazado: '<span class="badge badge-rechazado">Rechazado</span>'
+  };
+  const tiempo = new Date(p.timestamp).toLocaleTimeString('es', { hour:'2-digit', minute:'2-digit' });
+  const esNuevo = p.estado === 'pendiente_confirmacion';
+  const iaClass = d.completo ? 'ok' : 'warn';
+  const iaIcon = d.completo ? '✨' : '⚠️';
+
+  let acciones = '';
+  if (p.estado === 'pendiente_confirmacion' || p.estado === 'revision') {
+    acciones = `
+      <button class="btn btn-green" onclick="confirmar(${p.id})">✅ Confirmar</button>
+      <button class="btn btn-red" onclick="rechazar(${p.id})">✕ Rechazar</button>`;
+  } else if (p.estado === 'confirmado') {
+    acciones = `<span style="font-size:12px;color:var(--green);">✓ Confirmado por ${p.confirmado_por || 'IA'} a las ${new Date(p.confirmado_en).toLocaleTimeString('es',{hour:'2-digit',minute:'2-digit'})}</span>`;
+  }
+
+  return `<div class="pedido ${esNuevo ? 'nuevo' : ''} ${p.estado}" id="pedido-${p.id}">
+    <div class="pedido-header">
+      <div>
+        <div class="pedido-id">Pedido #${d.numeroPedido || p.id}</div>
+        <div class="pedido-time">🕐 ${tiempo} · ${d.nombre || 'Cliente'}</div>
+      </div>
+      ${badges[p.estado] || ''}
+    </div>
+    <div class="pedido-grid">
+      <div class="campo"><div class="campo-label">Producto</div><div class="campo-value">${d.producto || '—'}</div></div>
+      <div class="campo"><div class="campo-label">Total</div><div class="campo-value">${d.total ? '$'+d.total : '—'}</div></div>
+      <div class="campo"><div class="campo-label">Ciudad</div><div class="campo-value">${d.ciudad || '—'}</div></div>
+      <div class="campo"><div class="campo-label">Teléfono</div><div class="campo-value">${d.telefono || '—'}</div></div>
+    </div>
+    <div class="ia-decision ${iaClass}">
+      <span class="ia-icon">${iaIcon}</span>
+      <span>IA: ${p.decision_ia || d.decision || '—'}</span>
+    </div>
+    ${p.respuesta_bot && p.estado === 'confirmado' ? `<div class="msg-preview">${p.respuesta_bot}</div>` : ''}
+    <div class="pedido-actions">${acciones}</div>
+  </div>`;
+}
+
+function actualizarStats() {
+  const lista = Array.from(pedidosMap.values());
+  document.getElementById('stat-total').textContent = lista.length;
+  document.getElementById('stat-confirmados').textContent = lista.filter(p => p.estado === 'confirmado').length;
+  document.getElementById('stat-pendientes').textContent = lista.filter(p => p.estado === 'pendiente_confirmacion' || p.estado === 'revision').length;
+  const total = lista.filter(p => p.estado === 'confirmado' && p.datos?.total).reduce((a,p) => a + parseFloat(p.datos.total||0), 0);
+  document.getElementById('stat-dinero').textContent = '$' + total.toFixed(2);
+}
+
+function actualizarStatsDesdeData(data) {
+  document.getElementById('stat-total').textContent = data.totalPedidos;
+  document.getElementById('stat-confirmados').textContent = data.confirmados;
+  document.getElementById('stat-pendientes').textContent = data.pendientes;
+  document.getElementById('stat-dinero').textContent = '$' + data.totalDinero;
+}
+
+async function confirmar(id) {
+  const btn = event.target;
+  btn.disabled = true; btn.textContent = 'Confirmando...';
+  await fetch(`/api/confirmar/${id}`, { method: 'POST' });
+}
+
+async function rechazar(id) {
+  await fetch(`/api/rechazar/${id}`, { method: 'POST' });
+}
+
+async function simularPedido() {
+  const btn = event.target;
+  btn.disabled = true; btn.textContent = 'Simulando...';
+  await fetch('/api/simular', { method: 'POST' });
+  setTimeout(() => { btn.disabled = false; btn.textContent = '⚡ Simular pedido de prueba'; }, 2000);
+}
+</script>
+</body>
+</html>
