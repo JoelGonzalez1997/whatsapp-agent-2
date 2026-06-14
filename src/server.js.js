@@ -7,8 +7,8 @@ const fetch = require('node-fetch');
 const path = require('path');
 const pino = require('pino');
 
-const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || '';
-const PORT = process.env.PORT || 3001;
+const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || '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';
+const PORT = process.env.PORT || 3000;
 const COURIERS = ['Servientrega', 'Gintracom'];
 
 const MENSAJE_CONFIRMACION = (nombre, numeroPedido, producto, cantidad, total, ciudad) =>
