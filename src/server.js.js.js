@@ -7,7 +7,8 @@ const fetch = require('node-fetch');
 const path = require('path');
 const pino = require('pino');
 
-const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;const PORT = process.env.PORT || 3000;
+const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+const PORT = process.env.PORT || 3000;
 const COURIERS = ['Servientrega', 'Gintracom'];
 
 const MENSAJE_CONFIRMACION = (nombre, numeroPedido, producto, cantidad, total, ciudad) =>
@@ -44,8 +45,8 @@ let qrDataUrl = null;
 let estadoConexion = 'desconectado';
 let sock = null;
 
-const esperandoConfirmacion = new Map();
-const esperandoDireccion = new Map();
+// MAPAS PARA RASTREAR ESTADO DE CONVERSACIÓN
+const clientesEnCurso = new Map(); // { numero: { estado: 'esperando_direccion'|'esperando_confirmacion', pedido: {...} } }
 
 async function conectarWhatsApp() {
   const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
@@ -91,9 +92,17 @@ async function conectarWhatsApp() {
 
   sock.ev.on('creds.update', saveCreds);
 
+  const mensajesProcesados = new Set();
+
   sock.ev.on('messages.upsert', async ({ messages }) => {
     for (const msg of messages) {
       if (msg.key.fromMe) continue;
+      
+      // DEDUPLICADOR
+      const msgId = msg.key.id;
+      if (mensajesProcesados.has(msgId)) continue;
+      mensajesProcesados.add(msgId);
+      
       const texto = msg.message?.conversation || msg.message?.extendedTextMessage?.text || '';
       if (!texto) continue;
       const de = msg.key.remoteJid;
@@ -109,30 +118,62 @@ async function enviarMensaje(jid, texto) {
 }
 
 async function procesarMensaje(texto, de, msg) {
-  if (esperandoDireccion.has(de)) {
-    const pedido = esperandoDireccion.get(de);
+  console.log(`\n📨 Mensaje de ${de}: ${texto.substring(0, 50)}...`);
+
+  // ============================================
+  // ESTADO 1: CLIENTE RESPONDIENDO CON DIRECCIÓN COMPLETA
+  // ============================================
+  if (clientesEnCurso.has(de) && clientesEnCurso.get(de).estado === 'esperando_direccion') {
+    const cursoCliente = clientesEnCurso.get(de);
+    const pedido = cursoCliente.pedido;
+    
+    // ACTUALIZA la dirección que el cliente acaba de enviar
     pedido.datos.ciudad = texto;
     pedido.datos.completo = true;
-    esperandoDireccion.delete(de);
-    const msgConfirmar = `✅ Gracias por tu dirección.\n\nResumen de tu pedido #${pedido.datos.numeroPedido}:\n🛍️ ${pedido.datos.producto}\n📦 Cantidad: ${pedido.datos.cantidad}\n💰 Total: $${pedido.datos.total}\n📍 Entrega en: ${texto}\n\nResponde *CONFIRMO* para confirmar tu pedido.`;
-    await enviarMensaje(de, msgConfirmar);
-    esperandoConfirmacion.set(de, pedido);
+    
+    console.log(`✅ Dirección recibida, pidiendo confirmación...`);
+    
+    // ENVÍA: Verifica la dirección y pide CONFIRMO
+    const msgVerificar = `✅ Gracias por tu dirección.\n\nResumen de tu pedido #${pedido.datos.numeroPedido}:\n🛍️ ${pedido.datos.producto}\n📦 Cantidad: ${pedido.datos.cantidad}\n💰 Total: $${pedido.datos.total}\n📍 Entrega en: ${texto}\n\nResponde *CONFIRMO* para confirmar tu pedido. ✅`;
+    
+    await enviarMensaje(de, msgVerificar);
+    pedido.respuesta_bot = msgVerificar;
     pedido.estado = 'pendiente_confirmacion';
-    pedido.decision_ia = 'Dirección recibida, esperando confirmación del cliente';
+    pedido.decision_ia = 'Dirección completada — esperando confirmación del cliente';
+    
+    // CAMBIA estado: ahora espera que diga CONFIRMO
+    clientesEnCurso.set(de, { estado: 'esperando_confirmacion', pedido });
     io.emit('pedido_actualizado', pedido);
     return;
   }
 
-  if (esperandoConfirmacion.has(de) && texto.toUpperCase().includes('CONFIRMO')) {
-    const pedido = esperandoConfirmacion.get(de);
-    esperandoConfirmacion.delete(de);
+  // ============================================
+  // ESTADO 2: CLIENTE CONFIRMANDO CON "CONFIRMO"
+  // ============================================
+  if (clientesEnCurso.has(de) && clientesEnCurso.get(de).estado === 'esperando_confirmacion' && texto.toUpperCase().includes('CONFIRMO')) {
+    const cursoCliente = clientesEnCurso.get(de);
+    const pedido = cursoCliente.pedido;
+    
+    console.log(`✅ Cliente confirmó, enviando confirmación final...`);
+    
+    // CONFIRMA PEDIDO (envía mensaje de confirmación)
     await confirmarPedido(pedido.id, true, de);
+    
+    // LIMPIA el estado del cliente
+    clientesEnCurso.delete(de);
+    console.log(`✅ Pedido completamente confirmado`);
     return;
   }
 
-  if (!texto.includes('pedido #') && !texto.includes('Pedido #')) return;
+  // ============================================
+  // ESTADO 3: NUEVO PEDIDO (del formulario Shopify)
+  // ============================================
+  if (!texto.includes('pedido #') && !texto.includes('Pedido #')) {
+    console.log(`⏭️ Ignorando: mensaje sin número de pedido`);
+    return;
+  }
 
-  console.log(`\n📨 Nuevo pedido recibido de ${de}`);
+  console.log(`\n🔍 Analizando nuevo pedido de Shopify...`);
   const datosPedido = await analizarPedidoConIA(texto);
 
   const pedido = {
@@ -151,22 +192,39 @@ async function procesarMensaje(texto, de, msg) {
   pedidos.unshift(pedido);
   io.emit('nuevo_pedido', pedido);
 
+  // ============================================
+  // DECISIÓN: ¿Dirección completa o incompleta?
+  // ============================================
+  
   if (!datosPedido.ciudad || datosPedido.ciudad === 'null' || datosPedido.ciudad === null) {
-    const msgDireccion = `Hola ${datosPedido.nombre || 'cliente'} 👋\n\nHemos recibido tu pedido #${datosPedido.numeroPedido} 🎉\n\nPara proceder con el envío necesitamos tu dirección completa.\n\n📍 Por favor responde con tu dirección de entrega detallada.\n\n¡Gracias!`;
-    await enviarMensaje(de, msgDireccion);
-    pedido.respuesta_bot = msgDireccion;
+    // 🔴 DIRECCIÓN INCOMPLETA - Pedir que la complete
+    console.log(`📍 Dirección incompleta, pidiendo al cliente...`);
+    
+    const msgSolicitarDireccion = `Hola ${datosPedido.nombre || 'cliente'} 👋\n\nHemos recibido tu pedido #${datosPedido.numeroPedido} 🎉\n\nPara proceder con el envío necesitamos tu dirección completa.\n\n📍 Por favor responde con tu dirección de entrega detallada.\n\n¡Gracias!`;
+    
+    await enviarMensaje(de, msgSolicitarDireccion);
+    pedido.respuesta_bot = msgSolicitarDireccion;
     pedido.decision_ia = 'Dirección incompleta — esperando que el cliente la complete';
-    esperandoDireccion.set(de, pedido);
+    pedido.estado = 'esperando_direccion';
+    
+    // REGISTRA que este cliente está esperando dirección
+    clientesEnCurso.set(de, { estado: 'esperando_direccion', pedido });
     io.emit('pedido_actualizado', pedido);
     return;
   }
 
-  const msgConfirmar = `Hola ${datosPedido.nombre || 'cliente'} 👋\n\nHemos recibido tu pedido #${datosPedido.numeroPedido} 🎉\n\nResumen:\n🛍️ ${datosPedido.producto}\n📦 Cantidad: ${datosPedido.cantidad}\n💰 Total: $${datosPedido.total}\n📍 Entrega en: ${datosPedido.ciudad}\n\nResponde *CONFIRMO* para confirmar tu pedido. ✅`;
-  await enviarMensaje(de, msgConfirmar);
-  pedido.respuesta_bot = msgConfirmar;
+  // ✅ DIRECCIÓN COMPLETA - Pedir confirmación directamente
+  console.log(`✅ Dirección completa desde el inicio, pidiendo confirmación...`);
+  
+  const msgPedirConfirmacion = `Hola ${datosPedido.nombre || 'cliente'} 👋\n\nHemos recibido tu pedido #${datosPedido.numeroPedido} 🎉\n\nResumen:\n🛍️ ${datosPedido.producto}\n📦 Cantidad: ${datosPedido.cantidad}\n💰 Total: $${datosPedido.total}\n📍 Entrega en: ${datosPedido.ciudad}\n\nResponde *CONFIRMO* para confirmar tu pedido. ✅`;
+  
+  await enviarMensaje(de, msgPedirConfirmacion);
+  pedido.respuesta_bot = msgPedirConfirmacion;
   pedido.estado = 'pendiente_confirmacion';
   pedido.decision_ia = 'Pedido completo — esperando confirmación del cliente';
-  esperandoConfirmacion.set(de, pedido);
+  
+  // REGISTRA que este cliente está esperando que diga CONFIRMO
+  clientesEnCurso.set(de, { estado: 'esperando_confirmacion', pedido });
   io.emit('pedido_actualizado', pedido);
 }
 
