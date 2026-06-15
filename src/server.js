@@ -230,6 +230,49 @@ async function procesarMensaje(texto, de, msg) {
 
 async function analizarPedidoConIA(texto) {
   try {
+    console.log(`\n🤖 Analizando con Claude Sonnet 4.6...`);
+    
+    const prompt = `You are an expert at extracting order information from WhatsApp messages in Spanish.
+
+Your task: Extract order details from this WhatsApp message and respond ONLY with valid JSON.
+
+MESSAGE TO ANALYZE:
+${texto}
+
+INSTRUCTIONS:
+1. Extract EXACTLY these fields:
+   - nombre: Customer name (null if not found)
+   - numeroPedido: Order number/ID (look for #XXXX or "pedido #XXXX")
+   - producto: Product description
+   - cantidad: Quantity
+   - total: Total price WITHOUT currency symbol (just the number like "29.99")
+   - ciudad: Full delivery address with street + number OR intersection (e.g., "Sarar y Magnolia, Cuenca, Azuay")
+   - telefono: Phone number
+   - completo: true if all required fields present, false otherwise
+   - faltante: List of missing fields (empty string if none)
+   - decision: Brief explanation in Spanish
+
+2. RULES FOR "ciudad":
+   - COMPLETE address: "Sarar y Magnolia, Cuenca" OR "Calle 5 #234, Ciudad" OR "Av. Principal 100"
+   - INCOMPLETE address: "Calle 5" OR "Av. Principal" (no number/intersection)
+   - If address is incomplete or missing, set to null
+
+3. Return ONLY valid JSON, no markdown, no backticks, no extra text.
+
+RESPONSE FORMAT (valid JSON only):
+{
+  "nombre": "string or null",
+  "numeroPedido": "string or null",
+  "producto": "string or null",
+  "cantidad": "string or null",
+  "total": "number string or null",
+  "ciudad": "string or null",
+  "telefono": "string or null",
+  "completo": boolean,
+  "faltante": "string or empty",
+  "decision": "string in Spanish"
+}`;
+
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {
@@ -238,38 +281,80 @@ async function analizarPedidoConIA(texto) {
         'anthropic-version': '2023-06-01'
       },
       body: JSON.stringify({
-        model: 'claude-haiku-4-5-20251001',
-        max_tokens: 1000,
+        model: 'claude-sonnet-4-6',
+        max_tokens: 500,
         messages: [{
           role: 'user',
-          content: `Analiza este mensaje de pedido de WhatsApp y extrae los datos. Responde SOLO con JSON válido, sin texto adicional.
-
-Mensaje:
-${texto}
-
-Responde con este formato exacto:
-{
-  "nombre": "nombre del cliente o null",
-  "numeroPedido": "número del pedido o null",
-  "producto": "descripción del producto o null",
-  "cantidad": "cantidad o null",
-  "total": "monto total sin símbolo $ o null",
-  "ciudad": "ciudad y provincia o null. Una dirección COMPLETA debe tener calle con número o intersección (ej: '39 y La A', 'Av. Principal 234'). Una dirección INCOMPLETA es solo nombre de calle sin número (ej: '9 de octubre', 'Av. Amazonas'). Una intersección como 'Sarar y Magnolia' SÍ es una dirección completa. Solo pon null si es únicamente el nombre de una calle sin intersección ni número",
-  "telefono": "teléfono del cliente o null",
-  "completo": true o false,
-  "faltante": "lista de campos que faltan o vacío",
-  "decision": "texto breve explicando la decisión de la IA"
-}`
+          content: prompt
         }]
       })
     });
+
+    if (!response.ok) {
+      const errorData = await response.json();
+      console.error(`❌ Error de API Anthropic (${response.status}):`, errorData);
+      throw new Error(`API Error ${response.status}: ${errorData.error?.message || 'Unknown'}`);
+    }
+
     const data = await response.json();
-    if (!data.content || !data.content[0]) throw new Error('API error');
-    const limpio = data.content[0].text.trim().replace(/```json|```/g, '').trim();
-    return JSON.parse(limpio);
+    
+    if (!data.content || !data.content[0] || !data.content[0].text) {
+      console.error('❌ Respuesta inesperada de API:', JSON.stringify(data));
+      throw new Error('Invalid API response structure');
+    }
+
+    let rawText = data.content[0].text.trim();
+    console.log(`📦 Respuesta bruta de Claude:\n${rawText.substring(0, 200)}...`);
+
+    rawText = rawText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+
+    let datosParsed;
+    try {
+      datosParsed = JSON.parse(rawText);
+    } catch (parseError) {
+      console.error('❌ Error parseando JSON:', parseError.message);
+      console.error('   Texto recibido:', rawText);
+      throw new Error(`JSON parse error: ${parseError.message}`);
+    }
+
+    const camposRequeridos = ['nombre', 'numeroPedido', 'producto', 'cantidad', 'total', 'ciudad', 'telefono', 'completo', 'faltante', 'decision'];
+    const camposFaltantes = camposRequeridos.filter(campo => !(campo in datosParsed));
+    
+    if (camposFaltantes.length > 0) {
+      console.warn(`⚠️ Campos faltantes en respuesta:`, camposFaltantes);
+      camposRequeridos.forEach(campo => {
+        if (!(campo in datosParsed)) {
+          datosParsed[campo] = null;
+        }
+      });
+      datosParsed.completo = false;
+    }
+
+    console.log(`✅ Análisis exitoso:`, {
+      nombre: datosParsed.nombre,
+      numeroPedido: datosParsed.numeroPedido,
+      ciudad: datosParsed.ciudad,
+      completo: datosParsed.completo
+    });
+
+    return datosParsed;
+
   } catch (error) {
-    console.error('Error al analizar con IA:', error);
-    return { nombre: null, numeroPedido: null, producto: null, cantidad: null, total: null, ciudad: null, completo: false, faltante: 'Error', decision: 'Error en análisis IA — revisión manual requerida' };
+    console.error('❌ Error en analizarPedidoConIA:', error.message);
+    console.error('   Stack:', error.stack);
+    
+    return {
+      nombre: null,
+      numeroPedido: null,
+      producto: null,
+      cantidad: null,
+      total: null,
+      ciudad: null,
+      telefono: null,
+      completo: false,
+      faltante: 'Error en análisis',
+      decision: `❌ Error: ${error.message}. Requiere revisión manual.`
+    };
   }
 }
 
