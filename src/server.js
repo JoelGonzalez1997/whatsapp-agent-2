@@ -447,4 +447,5 @@ server.listen(PORT, () => {
   console.log('📱 Iniciando conexión con WhatsApp...\n');
 });
 
-conectarWhatsApp();
+// Conectar WhatsApp en background (sin bloquear el servidor)
+conectarWhatsApp().catch(err => console.error('Error conectando WhatsApp:', err));
